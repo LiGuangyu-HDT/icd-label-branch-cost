@@ -1,0 +1,261 @@
+import contextlib
+
+import torch
+from torch import nn
+import torch.nn.functional as F
+
+from model.text_encoder import TextEncoder
+from model.decoder import create_decoder
+from model.label_encoder import LabelEncoder
+from model.losses import loss_fn
+from torch.optim import AdamW          # transformers.AdamW was removed in transformers>=5; torch's equivalent is used
+from transformers import (
+    get_linear_schedule_with_warmup,
+    get_constant_schedule_with_warmup,
+    get_cosine_schedule_with_warmup
+)
+
+
+def compute_kl_loss(p, q, pad_mask=None):
+    """Symmetric KL for R-Drop.
+
+    ``F.kl_div(log_softmax(p), softmax(q))`` must not be used: internally it evaluates
+    ``xlogy(target, target) - target * input``, and when the logits are large enough for
+    ``softmax`` to underflow to exact zeros the forward pass is guarded to 0 while the
+    backward pass becomes 0/0 = NaN.
+
+    Measured: at |logit| ~ 90 the forward value is a normal 3.6198e-02 while the backward
+    pass produces 17,842 NaNs. A four-layer Transformer encoder reaches |logit| ~ 90 at
+    initialisation; the BiLSTM never exposed this because tanh bounds its output to (-1, 1).
+
+    Writing the KL directly from ``log_softmax`` is pointwise equivalent (the forward pass is
+    bit-identical) and keeps every gradient term finite.
+    """
+    lp = F.log_softmax(p, dim=-1)
+    lq = F.log_softmax(q, dim=-1)
+    p_loss = F.softmax(q, dim=-1) * (lq - lp)      # KL(q || p), pointwise
+    q_loss = F.softmax(p, dim=-1) * (lp - lq)      # KL(p || q), pointwise
+
+    # pad_mask is for seq-level tasks
+    if pad_mask is not None:
+        p_loss.masked_fill_(pad_mask, 0.)
+        q_loss.masked_fill_(pad_mask, 0.)
+
+    p_loss = p_loss.mean()
+    q_loss = q_loss.mean()
+
+    loss = (p_loss + q_loss) / 2
+    return loss
+
+
+def _branch_fp32_flag(args, name):
+    """Read --text_fp32 / --label_fp32 (args may be None, as in tests)."""
+    return bool(getattr(args, name, False)) if args is not None else False
+
+
+def _fp32_ctx():
+    """Turn mixed precision off for one block so it runs in true fp32.
+
+    Needed for the precision ablation: bf16 damages the recurrent encoder but not the
+    Transformer, so isolating the damaged side requires pinning one branch to fp32 while the
+    other stays bf16. torch's autocast nests, so an inner ``enabled=False`` gives real fp32
+    within that block.
+
+    With neither switch set this returns ``nullcontext`` and nothing changes.
+    """
+    if torch.cuda.is_available():
+        return torch.autocast(device_type='cuda', enabled=False)
+    return contextlib.nullcontext()
+
+
+def create_label_combine_config(args, text_combine_config):
+    """Hybrid combiner (``--label_combiner lstm``): a separate combiner config for the
+    label-description branch.
+
+    Why the two branches want different operators:
+      * text branch (B x 4000): flash attention 61.7 ms vs BiLSTM 387.9 ms, 6.28x faster;
+      * label branch (35,684 sequences of <=30 words): attention is negligible and flash's
+        launch/bookkeeping overhead dominates, so BiLSTM is 239 ms against 476 ms, 2x faster.
+    Converting both branches to Transformer+FA is therefore a net loss on the shorter one.
+
+    Returning ``None`` means the label branch shares the text branch's encoder, reproducing
+    the original behaviour exactly.
+    """
+    kind = str(getattr(args, 'label_combiner', 'same') or 'same')
+    if kind == 'same':
+        return None
+    # Copy is required: TextEncoder.__init__ writes input_dim into this dict
+    cfg = dict(text_combine_config)
+    cfg['model'] = kind
+    if kind == 'lstm':
+        cfg['rnn_dim'] = int(getattr(args, 'label_rnn_dim', 256))
+        cfg['num_layers'] = int(getattr(args, 'label_lstm_layers', 2))
+        cfg['lstm_dropout'] = (float(getattr(args, 'label_lstm_dp', 0.1))
+                               if cfg['num_layers'] > 1 else 0.0)
+        # BiLSTM takes no ragged input, so the label branch stays padded
+        cfg['varlen'] = False
+        cfg['enc_repr'] = 'padded'
+    else:
+        raise ValueError('unknown --label_combiner: %r (supported: same, lstm)' % (kind,))
+    return cfg
+
+
+class IcdModel(nn.Module):
+    def __init__(self, word_config={}, combine_config={},
+                 decoder_config={}, label_config={}, loss_config={}, args=None):
+        super().__init__()
+        self.encoder = TextEncoder(word_config, combine_config)
+        # ── Hybrid combiner ──────────────────────────────────────────────────
+        # None: the label branch shares the text branch's TextEncoder (default).
+        # Otherwise the label branch gets its own combiner over the same Word_Encoder.
+        # A plain attribute, so pickling stays safe (no enums or closures).
+        self.label_text_encoder = None
+        _lcc = create_label_combine_config(args, combine_config) if args is not None else None
+        if _lcc is not None:
+            self.label_text_encoder = TextEncoder(
+                word_config, _lcc, word_encoder=self.encoder.word_encoder)
+        self.decoder = create_decoder(decoder_config)
+        self.label_encoder = LabelEncoder(label_config)
+        self.loss_config = loss_config
+        self.args = args
+        
+    def _repr(self, which):
+        """Return a branch's encoder output (padded / varlen / bucketed).
+
+        The two branches may differ, which is the central configuration of this work:
+          * the label branch (35,684 descriptions / 200,353 real tokens) is the memory wall,
+            so it uses bucketed (no padding waste, runs in fp32) or varlen (flash);
+          * the text branch (B x 4000) must match what the decoder expects: padded for
+            attn_impl naive/mem_efficient, ragged for varlen.
+        """
+        return getattr(self.args, which + '_repr_final', None)
+
+    def _text_ctx(self):
+        """Pin the text branch to fp32 under --text_fp32; no-op otherwise."""
+        return _fp32_ctx() if _branch_fp32_flag(self.args, 'text_fp32') else contextlib.nullcontext()
+
+    def _label_ctx(self):
+        """Pin the label branch to fp32 under --label_fp32; no-op otherwise."""
+        return _fp32_ctx() if _branch_fp32_flag(self.args, 'label_fp32') else contextlib.nullcontext()
+
+    def calculate_text_hidden(self, input_word, word_mask, enc_repr=None):
+        with self._text_ctx():
+            hidden = self.encoder(input_word, word_mask, enc_repr)
+        return hidden
+
+    def _label_enc(self):
+        """Encoder used by the label branch: shared by default, an independent BiLSTM under
+        ``--label_combiner lstm``."""
+        return self.label_text_encoder if self.label_text_encoder is not None else self.encoder
+
+    def _calc_label_feats(self):
+        """Single entry point for the label branch (encoder + pooling), so precision can be
+        ablated per branch."""
+        with self._label_ctx():
+            label_hidden = self._label_enc()(self.c_input_word,
+                                             self.c_word_mask,
+                                             self._repr('label'))
+            return self.label_encoder(label_hidden, self.c_word_mask)
+
+    def calculate_label_hidden(self):
+        self.label_feats = self._calc_label_feats()
+
+    def forward(self, batch, rdrop=False):
+        if rdrop:
+            return self.forward_rdrop(batch)
+        input_word, word_mask = batch[0:2]
+        hidden = self.calculate_text_hidden(input_word, word_mask,
+                                            self._repr('text'))
+        
+        label_feats = self._calc_label_feats()
+        c_logits = self.decoder(hidden, word_mask, label_feats)
+        
+        c_label = batch[-2]
+        mc_loss = 0.0
+        
+        c_loss = loss_fn(c_logits, c_label, self.loss_config)
+        loss = mc_loss * self.loss_config['main_code_loss_weight'] + \
+               c_loss * self.loss_config['code_loss_weight']
+        return {'mc_loss':mc_loss, 'c_loss':c_loss, 'loss':loss}
+               
+    
+    def forward_rdrop(self, batch):
+        input_word, word_mask = batch[0:2]
+        label_feats = self._calc_label_feats()
+        
+        hidden0 = self.calculate_text_hidden(input_word, word_mask, self._repr('text'))
+        hidden1 = self.calculate_text_hidden(input_word, word_mask, self._repr('text'))
+        
+        # ignore mc_logits
+        c_logits0 = self.decoder(hidden0, word_mask, label_feats)
+        c_logits1 = self.decoder(hidden1, word_mask, label_feats)
+        
+        c_label = batch[-2]
+        
+        c_loss = (loss_fn(c_logits0, c_label, self.loss_config) + \
+                  loss_fn(c_logits1, c_label, self.loss_config)) * 0.5
+        
+        kl_loss = compute_kl_loss(c_logits0, c_logits1)
+        
+        loss = self.loss_config['rdrop_alpha'] * kl_loss + \
+               c_loss * self.loss_config['code_loss_weight']
+        return {'kl_loss':kl_loss, 'c_loss':c_loss, 'loss':loss}
+
+    def predict(self, batch, threshold=None):
+        input_word, word_mask = batch[0:2]
+        hidden = self.calculate_text_hidden(input_word, word_mask, self._repr('text'))
+        assert hasattr(self, 'label_feats')
+        yhat_raw = self.decoder(hidden, word_mask, self.label_feats)
+        if isinstance(yhat_raw, tuple):
+            yhat_raw = yhat_raw[0]
+        if threshold is None:
+            threshold = self.args.prob_threshold
+        yhat = yhat_raw >= threshold
+        y = batch[-2]
+        return {"yhat_raw": yhat_raw, "yhat": yhat, "y": y}
+
+    def configure_optimizers(self, train_dataloader=None):
+        args = self.args
+        if self.args.optimizer == "Adam":
+            optimizer = torch.optim.Adam(self.parameters(), lr=args.learning_rate)
+            return [optimizer], [None]
+        if self.args.optimizer == "SGD":
+            optimizer = torch.optim.SGD(self.parameters(), lr=args.learning_rate)
+            return [optimizer], [None]
+        if self.args.optimizer == "AdamW":
+            no_decay = ["bias", "LayerNorm.weight"]
+            params = [
+                {
+                    "params": [p for n, p in self.named_parameters() if not any(nd in n for nd in no_decay)],
+                    "weight_decay": args.weight_decay,
+                    "lr": args.learning_rate
+                },
+                {
+                    "params": [p for n, p in self.named_parameters() if any(nd in n for nd in no_decay)],
+                    "weight_decay": 0.0,
+                    "lr": args.learning_rate
+                }, 
+            ]
+            
+            optimizer = AdamW(params, eps=args.adam_epsilon)
+            
+            self.total_steps = len(train_dataloader) * args.train_epoch
+            
+            if not hasattr(self.args, 'scheduler') or self.args.scheduler == "linear":
+                scheduler = get_linear_schedule_with_warmup(
+                    optimizer,
+                    num_warmup_steps=int(self.total_steps * args.warmup_ratio),
+                    num_training_steps=self.total_steps,
+                )
+            elif self.args.scheduler == "constant":
+                scheduler = get_constant_schedule_with_warmup(
+                    optimizer,
+                    num_warmup_steps=int(self.total_steps * args.warmup_ratio)
+                )
+            elif self.args.scheduler == "cosine":
+                scheduler = get_cosine_schedule_with_warmup(
+                    optimizer,
+                    num_warmup_steps=int(self.total_steps * args.warmup_ratio),
+                    num_training_steps=self.total_steps,
+                )
+            return [optimizer], [scheduler]

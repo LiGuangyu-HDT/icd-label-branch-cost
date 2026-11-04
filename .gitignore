@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.log
+*.pth
+*.pt
+data/MIMIC-III/
+data/processed/
+runs/
+outputs/
+
+# macOS
+.DS_Store
