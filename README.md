@@ -22,11 +22,9 @@ authors first.
 Reproduction code for the paper **"The label side is the bottleneck: memory cost, precision
 sensitivity and a ranking reversal in ICD coding"**.
 
-The paper is a *controlled diagnostic* study, not a leaderboard entry. This repository
-contains exactly what is needed to reproduce its numbers: the two model variants, the data
-preparation scripts, the equivalence test suite, the micro-benchmarks behind Table 1, the
-drivers for the eight-cell study and the 50-code seed study, and the scripts that regenerate
-every table and figure.
+This repository contains the two model variants, the data preparation scripts, the
+equivalence test suite, the micro-benchmarks behind Table 1, the drivers for the eight-cell
+study and the 50-code seed study, and the scripts that regenerate every table and figure.
 
 ---
 
@@ -63,12 +61,7 @@ attributable.
 
 ## 2. Data
 
-MIMIC-III v1.4 is **not redistributable**. Obtain it from PhysioNet under the
-[Credentialed Health Data License 1.5.0](https://physionet.org/content/mimiciii/1.4/) and
-place the extract somewhere outside the repository and point `--src` at it
-(conventionally `data/MIMIC-III/`, which `.gitignore` already excludes).
-
-What this repository *does* ship is everything needed to pin the splits exactly:
+The splits are pinned exactly by:
 
 | File | Rows | What it is |
 |---|---|---|
@@ -82,13 +75,7 @@ What this repository *does* ship is everything needed to pin the splits exactly:
 | `splits/NOT_IN_LOCAL_EXTRACT_hadm_ids.txt` | — | admissions absent from a given local extract |
 | `splits/DROPPED_unmappable_hadm_ids.txt` | — | records that could not be mapped to a label |
 
-These split files contain **bare hospital-admission identifiers only**: one integer per line,
-no header, no subject identifiers, no dates, no diagnoses. They are shipped so that the
-splits in the paper can be reproduced exactly. They are meaningless without the MIMIC-III
-database itself, which you must obtain yourself under the credentialed licence; nothing here
-can be used to reconstruct any patient record.
-
-Prepare the full setting:
+Bare admission identifiers only. Prepare the full setting:
 
 ```bash
 python data/prepare_data.py --help     # see the argument list
@@ -98,23 +85,7 @@ This writes `train_full.csv` / `dev_full.csv` / `test_full.csv` and the `*.json`
 dataloader reads, and prints the resulting counts. The 8,921-code label table is written
 from the official list, so `C = 8,921` matches the paper exactly.
 
-### 2.1 Files that must come from *your* MIMIC-III extract
-
-The repository deliberately ships **no MIMIC-derived content**. `model/*/constant.py`
-resolves `DATA_DIR` from the `ICD_DATA_DIR` environment variable; that directory must
-contain, produced by `prepare_data.py` from your own credentialed extract:
-
-```
-$ICD_DATA_DIR/
-├── mimic3/                     the per-split json produced by prepare_data.py
-├── D_ICD_DIAGNOSES.csv         hosp/d_icd_diagnoses.csv from MIMIC-III
-├── D_ICD_PROCEDURES.csv        hosp/d_icd_procedures.csv from MIMIC-III
-└── ICD9_descriptions           the ICD-9 hierarchy file
-```
-
-These are covered by the PhysioNet credentialed licence and are not redistributable.
-
-The second setting:
+### 2.1 The second setting
 
 ```bash
 python data/prepare_mimic3_50.py --help
@@ -127,11 +98,6 @@ python data/prepare_mimic3_50.py --help
 ```bash
 pip install -r requirements.txt
 ```
-
-`flash-attn` has no prebuilt wheel for every Python/CUDA combination and may take 20-40
-minutes to compile. If you hit a download that stalls on a large package, fetching the wheel
-with `curl -C -` and installing it locally is far more reliable than letting pip stream it;
-this was the single biggest source of setup time when the environment was rebuilt.
 
 Verified on **PyTorch 2.11.0+cu128 with flash-attn 2.8.3.post1**, Python 3.10.
 
@@ -266,9 +232,8 @@ python figures/make_figures.py           # Fig. 1–5 (reads the summaries; no G
 
 ## 9. Hardware and cost
 
-The full study consumed approximately 420 GPU-hours on two RTX 4090s. A single full-scale cell is
-6–72 GPU-hours; a MIMIC-III-50 run is 0.4–3.3 hours, which is what makes three seeds
-affordable there.
+The full study consumed approximately 420 GPU-hours on two RTX 4090s. A single full-scale cell
+is 6–72 GPU-hours; a MIMIC-III-50 run is 0.4–3.3 hours.
 
 ## 10. Licence
 
