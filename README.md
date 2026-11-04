@@ -33,7 +33,7 @@ every table and figure.
 ## 1. What is in here
 
 ```
-githubcode/
+.
 ├── model/
 │   ├── main/               full-scale pipeline  — cells 1, 2, 3, 5, 6
 │   └── hybrid/             hybrid label branch   — cells 7, 8
@@ -65,7 +65,8 @@ attributable.
 
 MIMIC-III v1.4 is **not redistributable**. Obtain it from PhysioNet under the
 [Credentialed Health Data License 1.5.0](https://physionet.org/content/mimiciii/1.4/) and
-place the extract at `data/MIMIC-III/`.
+place the extract somewhere outside the repository and point `--src` at it
+(conventionally `data/MIMIC-III/`, which `.gitignore` already excludes).
 
 What this repository *does* ship is everything needed to pin the splits exactly:
 
@@ -265,7 +266,7 @@ python figures/make_figures.py           # Fig. 1–5 (reads the summaries; no G
 
 ## 9. Hardware and cost
 
-The full study consumed roughly 400 GPU-hours on two RTX 4090s. A single full-scale cell is
+The full study consumed approximately 420 GPU-hours on two RTX 4090s. A single full-scale cell is
 6–72 GPU-hours; a MIMIC-III-50 run is 0.4–3.3 hours, which is what makes three seeds
 affordable there.
 
