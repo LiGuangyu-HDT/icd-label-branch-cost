@@ -52,12 +52,20 @@ class LSTM_Combiner(Combiner):
                                  bidirectional=True,
                                  dropout=self.combine_lstm_dropout,
                                  batch_first=True)
+        # Optional normalisation of the recurrent output. The Transformer and Reformer
+        # combiners renormalise at every layer; a BiLSTM does not, which is one of the
+        # three ingredients of the mechanism hypothesis in the paper (S7). This switch
+        # exists so that prediction (i) -- "a normalisation layer on the recurrent label
+        # branch should recover part of the bf16 loss" -- can be tested directly.
+        self.norm = nn.LayerNorm(self.rnn_dim) if self.combine_config['layer_norm'] else None
         if self.rnn_dim != self.output_dim:
             self.reduce_linear = nn.Linear(self.rnn_dim, self.output_dim)
     
     def combine_forward(self, embeds, word_mask, enc_repr=None):
         word_lengths = torch.sum(word_mask, dim=1)
         h = self.lstm_forward(embeds, word_lengths, self.combine_lstm)
+        if self.norm is not None:
+            h = self.norm(h)
         return h
     
     

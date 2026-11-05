@@ -58,6 +58,9 @@ def generate_parser():
                         choices=["none", "learn", "axial", "tri"], default="none")
     parser.add_argument("--axial", type=str, default='(64,64)')
     parser.add_argument("--layer_norm", action="store_true")
+    parser.add_argument("--label_layer_norm", action="store_true",
+                        help="normalise the recurrent label branch only; leaves the "
+                             "text branch untouched, unlike --layer_norm")
     
     # label related
     parser.add_argument("--label_num_layers", type=int, default=0)

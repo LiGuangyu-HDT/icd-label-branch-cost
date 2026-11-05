@@ -95,6 +95,9 @@ def create_label_combine_config(args, text_combine_config):
         # BiLSTM takes no ragged input, so the label branch stays padded
         cfg['varlen'] = False
         cfg['enc_repr'] = 'padded'
+        # --label_layer_norm normalises the recurrent label branch only. --layer_norm
+        # would change the text branch as well, which confounds the comparison.
+        cfg['layer_norm'] = bool(getattr(args, 'label_layer_norm', False))
     else:
         raise ValueError('unknown --label_combiner: %r (supported: same, lstm)' % (kind,))
     return cfg
