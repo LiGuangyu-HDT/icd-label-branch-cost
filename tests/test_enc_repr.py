@@ -45,6 +45,10 @@ args.sort_method = "random"
 
 dev = torch.device(args.dev)
 
+#: One entry per comparison made; the exit status is derived from it, so a number that
+#: moves out of tolerance fails the run instead of scrolling past as a printed digit.
+RESULTS = []
+
 
 def rel(a, b):
     a, b = a.float(), b.float()
@@ -132,6 +136,7 @@ def main():
         ref = run(ref_tag)
         if ref is None:
             print("   reference %s failed, skipped" % ref_tag)
+            RESULTS.append(False)
             continue
         print("   reference %s output max|.| = %.4e" % (ref_tag, ref[0].abs().max().item()))
         for tag in others:
@@ -139,14 +144,39 @@ def main():
                 continue
             got = run(tag)
             if got is None:
+                RESULTS.append(False)          # a path that raises is a failure, not a skip
                 continue
             od = rel(got[0], ref[0])
             gd = grel(got[2], ref[2])
+            # Tolerance per (precision, path). Chunked is the same kernel as the reference,
+            # so only tile order can differ; bucketed changes the kernel (dense SDPA vs
+            # flash), which is why bf16 needs three more orders of magnitude than fp32.
+            limit = TOLERANCE[(dt, tag)]
+            ok = (od[2] <= limit) and (gd[2] <= limit)
+            RESULTS.append(ok)
             print("   %-9s output max|d|=%.3e rel=%.3e | param grad max|d|=%.3e **rel=%.3e**"
-                  % (tag, od[0], od[2], gd[0], gd[2]))
+                  "  limit=%.0e  %s"
+                  % (tag, od[0], od[2], gd[0], gd[2], limit, "PASS" if ok else "FAIL"))
         del stack
         torch.cuda.empty_cache()
 
 
+#: rel-tolerance per (dtype, path). These are the bounds implied by Table 2 of the paper:
+#: chunking is the same kernel (differences only from tile order), bucketing swaps in dense
+#: SDPA, and bf16 carries ~3 extra digits of noise. A run that exceeds them is a regression.
+TOLERANCE = {
+    ("bf16", "chunked"): 1e-4,
+    ("bf16", "dense_pad"): 1e-2,
+    ("bf16", "bucketed"): 1e-2,
+    ("fp32", "bucketed"): 1e-4,
+}
+
+
 if __name__ == "__main__":
     main()
+    n_ok = sum(RESULTS)
+    print()
+    print("=" * 74)
+    print("summary: %d/%d comparisons within tolerance" % (n_ok, len(RESULTS)))
+    print("=" * 74)
+    sys.exit(0 if RESULTS and n_ok == len(RESULTS) else 1)

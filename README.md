@@ -41,7 +41,8 @@ study and the 50-code seed study, and the scripts that regenerate every table an
 │   ├── prepare_mimic3_50.py  the 200-slot MIMIC-III-50 setting
 │   ├── official_codes.txt  the 8,921 ICD-9 codes of the full setting
 │   └── splits/             the exact admission lists used (§2)
-├── tests/                  numerical-equivalence and unit tests (Table 2, V1–V4), with README
+├── tests/                  numerical-equivalence and unit tests (Table 2, V1–V4), plus
+│                           cpu_smoke.sh: the CPU half end to end, no data and no GPU
 ├── bench/                  micro-benchmarks (Table 1 and the timings in §3–§7), with README
 ├── study/                  the controlled-study drivers, with README
 ├── analysis/               aggregation, long-tail bucketing, table assembly, with README
@@ -112,13 +113,22 @@ export ICD_DATA_DIR=/path/to/data_caml          # output of prepare_data.py
 export ICD_WORD_EMBEDDING=/path/to/word2vec_sg0_100.model
 ```
 
+The analysis and figure scripts take a **results root** — a directory holding `runs_v2/`,
+`runs_seeds/`, `longtail/`. `study/run_matrix_v2.sh` and `study/run_seeds.sh` write into
+`study/out/` by default, so:
+
+```bash
+export ICD_RESULTS_ROOT=$PWD/study/out          # or pass --root to each script
+```
+
 ---
 
 ## 4. Numerical equivalence (Table 2)
 
-Run these **before** trusting any GPU number. They are dataset-free.
+Run these **before** trusting any GPU number. The first one needs neither data nor a GPU.
 
 ```bash
+bash   tests/cpu_smoke.sh              # the CPU half: run dirs -> tables -> buckets -> figures
 python tests/test_enc_repr.py          # V1 / V2: chunking and length-bucketing
 python tests/test_varlen.py            # V3: ragged (varlen) vs padded+mask
 python tests/test_hybrid_equiv.py      # hybrid label combiner
@@ -131,6 +141,7 @@ Expected (paper, Table 2):
 
 | Test | Result |
 |---|---|
+| CPU smoke | all 8 cells found, 5 figures drawn, exit 0 |
 | V1 chunking | gradient difference exactly `0.00e+00` (bit-identical) |
 | V2 length bucketing | max output difference `6.4e-07`, relative `6.3e-07` in fp32 — the same order as the reference implementation's own `5.1e-07` |
 | V3 ragged / varlen | decoder logits identical |
@@ -170,14 +181,26 @@ B=16 re-measurement in `bench_backends`.
 ```bash
 cd study
 bash run_matrix_v2.sh --dry          # 5 steps per cell: real s/step and peak memory
-bash run_matrix_v2.sh                # the full run
-bash run_matrix_v2.sh --cells 3,6    # a subset
+bash run_matrix_v2.sh                # the full run: 8 cells x 20 epochs
+bash run_matrix_v2.sh --cells 3,6    # a subset; 7,8 need model/hybrid (selected automatically)
+bash run_matrix_v2.sh --epochs 1     # one epoch per cell, to check the plumbing
 bash run_matrix_v2.sh --1gpu         # single device
 ```
 
 The recipe is fixed across all cells (batch 16 effective, AdamW lr 5e-4, weight decay 0.01,
 20 epochs, R-Drop α = 5, four synonym slots). Every cell inherits it unchanged; the paper's
 Table 3 lists it in full.
+
+Two things this script does that the analysis depends on:
+
+* **`--tag <cell name>`** — every run directory ends in the cell name
+  (`word_...-_1_msmn_fp32_naive`). `analysis/` and `figures/` match on that suffix; a run
+  launched without the tag is invisible to them. `$OUT/INDEX.tsv` records the mapping.
+* **`$OUT` is `study/out/runs_v2`**, not scratch space, so the next stage finds it. Set
+  `OUT_DIR` to move it.
+
+Cells 7 and 8 (`--label_combiner lstm`, `--label_fp32`) run from `model/hybrid`; the other
+six from `model/main`. `run_pipeline2.sh` waits on cell 7's `<name>.log.rc` in the run root.
 
 ### 6.2 Single-branch precision probes (§6.4, Table 8)
 
@@ -207,12 +230,19 @@ construction. Test thresholds come from dev, never from test.
 ## 7. Tables and figures
 
 ```bash
-python analysis/summarize_results.py     # per-cell summary tables
-python analysis/aggregate_seeds.py       # mean ± s.d. across seeds
-python analysis/dump_predictions.py      # per-code predictions, needed for the long tail
-python analysis/bucket_metrics.py        # five-way training-frequency buckets (Table 11)
-python figures/make_figures.py           # Fig. 1–5 (reads the summaries; no GPU)
+python analysis/summarize_results.py --runs "$ICD_RESULTS_ROOT/runs_v2" --out out/  # Tables 3–11
+python analysis/aggregate_seeds.py --root "$ICD_RESULTS_ROOT"                       # Table 9
+python analysis/dump_predictions.py --all --runs "$ICD_RESULTS_ROOT/runs_v2" \
+    --out "$ICD_RESULTS_ROOT/longtail"                                             # needs GPU
+python analysis/bucket_metrics.py --model ... --train-freq ... \
+    --out out/latex_rows.tex \
+    --json-out "$ICD_RESULTS_ROOT/longtail/bucket_metrics.json"                    # Table 11
+python figures/make_figures.py --root "$ICD_RESULTS_ROOT" --out out/figures        # Fig. 1–5
 ```
+
+Fig. 5 is drawn from `bucket_metrics.py --json-out`, not from constants in the plotting
+code; when that file is missing the script says so and falls back to the values the
+published figure used. Neither stage needs a GPU once `dump_predictions.py` has run.
 
 `figures/make_figures.py` writes `fig1.pdf … fig5.pdf`; Fig. 1 also carries the
 `5.34×` / `94 KB per token` annotations, which are computed from the same summary files.

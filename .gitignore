@@ -8,6 +8,9 @@ data/processed/
 runs/
 output/
 outputs/
+study/out/
+figures/out/
+tests/out/
 
 # macOS
 .DS_Store
