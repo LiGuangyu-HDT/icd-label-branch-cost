@@ -3,6 +3,7 @@ import os as _os
 warnings.filterwarnings('ignore',category=FutureWarning)
 import os
 import time
+import shutil
 import torch
 if _os.environ.get("ICD_ANOMALY"):
     torch.autograd.set_detect_anomaly(True)
@@ -124,8 +125,10 @@ def run(args):
         accelerator.wait_for_everyone()
         if accelerator.is_local_main_process:
             # One .pth is ~241 MB, so keeping every epoch of every cell does not fit.
-            # Keep the last _KEEP epoch weights plus best_epoch.pth (saved whenever
-            # dev improves and always retained).
+            # Keep the last _KEEP epoch weights. best_epoch.pth is written separately,
+            # the moment dev improves (see the early-stop block below), because pruning
+            # here would otherwise delete a best epoch from early in training before
+            # the run ends.
             _se = max(1, int(getattr(args, 'save_every', 1) or 1))
             _KEEP = max(1, int(getattr(args, 'keep_epochs', 10) or 10))
             if epoch_idx % _se == 0 or epoch_idx == args.train_epoch:
@@ -168,10 +171,12 @@ def run(args):
                 accelerator.print("[warn] failed to write epochs.jsonl: %s" % _e)
     
         # Early Stop
+        _improved = False
         if not best_dev_metric:
             best_dev_metric = epoch_dev_metric
             best_test_metric = epoch_test_metric
             best_epoch_idx = epoch_idx
+            _improved = True
         else:
             if args.early_stop_metric in epoch_dev_metric:
                 if epoch_dev_metric[args.early_stop_metric] >= best_dev_metric[args.early_stop_metric]:
@@ -179,8 +184,18 @@ def run(args):
                     best_test_metric = epoch_test_metric
                     best_epoch_idx = epoch_idx
                     early_stop_count = 0
+                    _improved = True
                 else:
                     early_stop_count += 1
+
+        # Copy the best weights the moment dev improves. Doing it only at the end is
+        # not enough: the pruning above drops epoch{N}.pth from earlier rounds, so a
+        # best epoch in the first (train_epoch - keep_epochs) rounds is already gone
+        # by then and the copy fails silently.
+        if _improved and accelerator.is_local_main_process:
+            _cur = os.path.join(output_path, "epoch%d.pth" % epoch_idx)
+            if os.path.exists(_cur):
+                shutil.copy2(_cur, os.path.join(output_path, "best_epoch.pth"))
 
         if args.early_stop_epoch > 0 and early_stop_count >= args.early_stop_epoch:
             accelerator.print(f"Early Stop at Epoch {epoch_idx}, \
@@ -195,9 +210,16 @@ def run(args):
         print_metrics(best_dev_metric, 'Best_Dev_Epoch' + str(best_epoch_idx), os.path.join(output_path, 'metric_log'))
         print_metrics(best_test_metric, 'Best_Test_Epoch' + str(best_epoch_idx))
         print_metrics(best_test_metric, 'Best_Test_Epoch' + str(best_epoch_idx), os.path.join(output_path, 'metric_log'))
-        best_path = os.path.join(output_path, f"epoch{best_epoch_idx}.pth")
+        best_path = os.path.join(output_path, "epoch%d.pth" % best_epoch_idx)
         new_path = os.path.join(output_path, "best_epoch.pth")
-        os.system(f'cp {best_path} {new_path}')
+        if os.path.exists(best_path):
+            shutil.copy2(best_path, new_path)
+        elif not os.path.exists(new_path):
+            accelerator.print(
+                "[error] best_epoch.pth is missing: epoch%d.pth was pruned by "
+                "--keep_epochs and no earlier copy exists. Predictions will fall "
+                "back to the last epoch, which is not the dev-selected one."
+                % best_epoch_idx)
 
     
 def train_one_epoch(model, steps, train_dataloader, dev_dataloader, test_dataloader, optimizer, scheduler, args, accelerator=None):
