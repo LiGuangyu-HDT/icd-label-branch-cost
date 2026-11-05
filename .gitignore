@@ -6,6 +6,7 @@ __pycache__/
 data/MIMIC-III/
 data/processed/
 runs/
+output/
 outputs/
 
 # macOS
