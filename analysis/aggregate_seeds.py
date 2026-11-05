@@ -15,8 +15,15 @@ Inputs, under the run directory:
   runs_seeds/mimic3-50_<...>_<cell>_sN  the three seeds of the 50-code setting
 
 Usage:
-  python3 aggregate_seeds.py             # read the local mirror
-  python3 aggregate_seeds.py --pod       # read live from a remote run directory
+  python3 aggregate_seeds.py                    # local runs, root resolved automatically
+  python3 aggregate_seeds.py --root PATH        # point at a results root explicitly
+  python3 aggregate_seeds.py --pod               # read live from $ICD_RUNS (needs .cpod/rc)
+
+The results root is resolved, in order, from --root, $ICD_RESULTS_ROOT, the author's
+mirror layout (<umbrella>/experiments/formal_results/experiments), and finally the
+repository itself -- which is where study/run_matrix_v2.sh and study/run_seeds.sh write
+with their default OUT_DIR. --pod additionally requires the .cpod/rc copy wrapper; if it
+is absent the script says so instead of reporting empty runs.
 """
 import argparse
 import glob
@@ -27,9 +34,32 @@ import statistics as st
 import subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
-MIRROR = os.path.join(ROOT, "experiments", "formal_results", "experiments")
-POD_RUNS = os.environ.get("ICD_RUNS", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "runs"))
+REPO = os.path.abspath(os.path.join(HERE, ".."))
+ROOT = os.path.abspath(os.path.join(REPO, ".."))
+
+
+def _root_candidates():
+    out = []
+    env = os.environ.get("ICD_RESULTS_ROOT")
+    if env:
+        out.append(env)
+    out.append(os.path.join(ROOT, "experiments", "formal_results", "experiments"))
+    out.append(REPO)
+    return out
+
+
+def resolve_results_root(explicit=None):
+    if explicit:
+        return os.path.abspath(explicit)
+    for cand in _root_candidates():
+        if os.path.isdir(os.path.join(cand, "runs_v2")) or os.path.isdir(os.path.join(cand, "runs")):
+            return cand
+    return _root_candidates()[0]
+
+
+MIRROR = resolve_results_root()
+POD_RUNS = os.environ.get("ICD_RUNS", os.path.join(REPO, "runs"))
+CPOD = os.path.join(ROOT, ".cpod", "rc")
 
 METRICS = [("auc_macro", "AUC-macro"), ("f1_micro", "micro-F1"),
            ("f1_macro", "macro-F1"), ("prec_at_8", "P@8")]
@@ -46,15 +76,27 @@ NICE = {"1_msmn_fp32_naive": "① BiLSTM fp32", "2_msmn_bf16_naive": "② BiLSTM
 
 
 # ── reading runs ────────────────────────────────────────────────────────
+CPOD_MISSING = ("[pod] %s is absent: --pod reads a remote run root through the .cpod/rc "
+                "copy wrapper, which is a local helper and is not part of this "
+                "repository. Use --root PATH (or $ICD_RESULTS_ROOT) for a local tree "
+                "instead." % CPOD)
+
+
+def require_pod():
+    """--pod is optional machinery; fail with an explanation, not with empty results."""
+    if not os.path.exists(CPOD):
+        raise SystemExit(CPOD_MISSING)
+
+
 def pod_ls(pat):
     """List matching directory names from the run root (read only, no GPU)."""
-    out = subprocess.run([os.path.join(ROOT, ".cpod", "rc"), "ls -d %s 2>/dev/null" % pat],
+    out = subprocess.run([CPOD, "ls -d %s 2>/dev/null" % pat],
                          capture_output=True, text=True).stdout
     return [l.strip() for l in out.splitlines() if l.strip().startswith("/")]
 
 
 def pod_rows(d):
-    out = subprocess.run([os.path.join(ROOT, ".cpod", "rc"), "cat %s/epochs.jsonl" % d],
+    out = subprocess.run([CPOD, "cat %s/epochs.jsonl" % d],
                          capture_output=True, text=True).stdout
     return [json.loads(l) for l in out.splitlines() if l.strip().startswith("{")]
 
@@ -175,16 +217,27 @@ def fmt_pct(x):
 
 
 def main():
+    global MIRROR
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pod", action="store_true", help="read live from the run root instead of the local mirror")
+    ap.add_argument("--root", default=None,
+                    help="results root holding runs/ runs_v2/ runs_seeds/ "
+                         "(default: $ICD_RESULTS_ROOT, then the paper's mirror, then the repo)")
+    ap.add_argument("--pod", action="store_true", help="read live through .cpod/rc from $ICD_RUNS")
     ap.add_argument("--json", default=None)
     ap.add_argument("--epochs", type=int, default=20, help="epochs a full-scale run should complete (default 20)")
     ap.add_argument("--include-partial", action="store_true",
                     help="include runs that did not finish (excluded by default)")
     a = ap.parse_args()
     use_pod = a.pod
+    if use_pod:
+        require_pod()
+    else:
+        MIRROR = resolve_results_root(a.root)
     print("source: %s" % ("live run directory %s" % POD_RUNS if use_pod
-                          else "local mirror %s" % os.path.relpath(MIRROR, ROOT)))
+                          else "local root %s" % os.path.relpath(MIRROR, ROOT)))
+    if not use_pod and not os.path.isdir(MIRROR):
+        print("        [warn] that directory does not exist; every cell below will be "
+              "reported as missing. Pass --root or set ICD_RESULTS_ROOT.")
 
     full, miss_full = collect_full(FULL_SEEDED, use_pod, ["s4", "s5"], a.epochs)
     small, miss_small = collect_small(SMALL_SEEDED, use_pod, ["s1", "s2", "s3"])

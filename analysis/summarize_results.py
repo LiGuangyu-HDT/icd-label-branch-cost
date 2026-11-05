@@ -44,6 +44,10 @@ CELLS = [
      "Transformer (varlen + **Flash Attention**) / FA / BF16"),
     ("6", "6_transf_fp32_naive",
      "Transformer (bucketed, non-flash) / naive / FP32"),
+    ("7", "7_hybrid_lstm_label_fa_text",
+     "Hybrid (BiLSTM label branch) / FA text / label BF16"),
+    ("8", "8_hybrid_labelfp32",
+     "Hybrid (BiLSTM label branch) / naive / label FP32"),
 ]
 #: Decisive contrasts: (A, B, description); A->B changes one variable
 PAIRS = [
@@ -53,6 +57,8 @@ PAIRS = [
     ("4", "5", "attention kernel (mem_efficient -> flash)"),
     ("3", "6", "precision, on the Transformer (bf16 -> fp32)"),
     ("1", "5", "end to end (cell 1 -> cell 5)"),
+    ("3", "7", "label branch gets its own encoder (shared -> BiLSTM)"),
+    ("7", "8", "label-branch precision (bf16 -> fp32): the repair"),
 ]
 
 

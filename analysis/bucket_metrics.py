@@ -26,6 +26,9 @@ column.
 """
 
 import argparse
+import json
+import math
+import os
 import sys
 
 import numpy as np
@@ -216,6 +219,49 @@ def latex_rows(results, scheme):
     return lines
 
 
+def short_labels(scheme):
+    """Compact x-axis labels, e.g. ['N=1', '2-5', '6-20', '21-100', '>100']."""
+    out = []
+    for lo, hi in BUCKET_SCHEMES[scheme]["edges"]:
+        if lo == hi:
+            out.append("N=%d" % lo)
+        elif hi == float("inf") or math.isinf(hi):
+            out.append(">%d" % (lo - 1) if lo > 1 else ">1")
+        else:
+            out.append("%d-%d" % (lo, hi))
+    return out
+
+
+def to_json(results, scheme):
+    """The machine-readable form, consumed by figures/make_figures.py (Fig. 5).
+
+    Nothing is re-derived downstream: the bucket edges and the per-bucket numbers are the
+    ones computed here, so a re-run of the long tail updates the figure by itself.
+    """
+    def clean(v):
+        return None if (v is None or (isinstance(v, float) and np.isnan(v))) else round(float(v), 4)
+
+    models = {}
+    for r in results:
+        models[r["method"]] = {
+            "n_codes": [b["n"] for b in r["buckets"]],
+            "f1mi": [clean(b["f1mi"]) for b in r["buckets"]],
+            "f1m": [clean(b["f1m"]) for b in r["buckets"]],
+            "aucm": [clean(b["aucm"]) for b in r["buckets"]],
+            "aucmi": [clean(b["aucmi"]) for b in r["buckets"]],
+            "all": {k: clean(v) for k, v in r["all"].items()},
+        }
+    return {
+        "generator": "analysis/bucket_metrics.py",
+        "scheme": scheme,
+        "buckets": short_labels(scheme),
+        "buckets_latex": BUCKET_SCHEMES[scheme]["labels"],
+        "edges": [[lo, (None if (hi == float("inf") or math.isinf(hi)) else hi)]
+                  for lo, hi in BUCKET_SCHEMES[scheme]["edges"]],
+        "models": models,
+    }
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -225,6 +271,9 @@ def main():
     ap.add_argument("--train-labels", help="training 0/1 matrix, shape (n_train, n_labels)")
     ap.add_argument("--scheme", choices=list(BUCKET_SCHEMES), default="5buckets")
     ap.add_argument("--out", default="latex_rows.tex", help="output path for the LaTeX rows")
+    ap.add_argument("--json-out", default=None,
+                    help="also write the numbers as JSON, which is what figures/make_figures.py "
+                         "reads for Fig. 5 (e.g. <results root>/longtail/bucket_metrics.json)")
     args = ap.parse_args()
 
     freq = load_train_freq(args)
@@ -250,6 +299,16 @@ def main():
     with open(args.out, "w") as fh:
         fh.write("\n".join(rows) + "\n")
     print("\nLaTeX rows written to %s (macro-F1 / macro-AUC alternating)" % args.out)
+
+    if args.json_out:
+        d = to_json(results, args.scheme)
+        parent = os.path.dirname(os.path.abspath(args.json_out))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(args.json_out, "w", encoding="utf-8") as fh:
+            json.dump(d, fh, ensure_ascii=False, indent=2)
+        print("JSON written to %s  (Fig. 5 reads this file; buckets: %s)"
+              % (args.json_out, ", ".join(d["buckets"])))
 
     print("""
 Notes:

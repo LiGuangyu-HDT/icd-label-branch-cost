@@ -2,14 +2,25 @@
 # -*- coding: utf-8 -*-
 r"""make_figures.py -- generate Fig. 1-5 of the paper (reads local run outputs, no GPU).
 
-Input: <run root>/{runs,runs_seeds,runs_diag,runs_probes}/*/epochs.jsonl
+Input: <results root>/{runs_v2,runs_seeds,runs_diag,runs_probes}/*/epochs.jsonl
 Epoch selection follows the protocol: the epoch with the highest dev P@8, reporting that
 epoch's test metrics.
 
-Output (PDF for LaTeX, PNG for preview): figures/fig1..fig5.{pdf,png}
+The results root is resolved, in order, from:
+  1. --root on the command line,
+  2. $ICD_RESULTS_ROOT,
+  3. <umbrella>/experiments/formal_results/experiments (the layout the paper was made in),
+  4. the repository itself (what study/run_matrix_v2.sh produces with its default OUT_DIR).
+Nothing here is tied to one machine: any of the four reaches the same code path.
 
-Usage:  python3 make_figures.py
+Fig. 5 reads analysis/bucket_metrics.py's JSON output when it is present, and says so on
+stdout when it has to fall back to the values the published figure was drawn from.
+
+Output (PDF for LaTeX, PNG for preview): <out>/fig1..fig5.{pdf,png}, default figures/out/.
+
+Usage:  python3 make_figures.py [--root PATH] [--out PATH] [--bucket-json PATH]
 """
+import argparse
 import glob
 import json
 import os
@@ -21,10 +32,35 @@ from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
-MIRROR = os.path.join(ROOT, "experiments", "formal_results", "experiments")
-OUT = os.path.join(ROOT, "experiments", "formal_results", "figures")
-os.makedirs(OUT, exist_ok=True)
+REPO = os.path.abspath(os.path.join(HERE, ".."))            # repository root
+ROOT = os.path.abspath(os.path.join(REPO, ".."))            # the author's umbrella directory
+
+
+def _root_candidates():
+    """Places the run directories may live, most specific first."""
+    out = []
+    env = os.environ.get("ICD_RESULTS_ROOT")
+    if env:
+        out.append(env)
+    out.append(os.path.join(ROOT, "experiments", "formal_results", "experiments"))
+    out.append(REPO)
+    return out
+
+
+def resolve_results_root(explicit=None):
+    if explicit:
+        return os.path.abspath(explicit)
+    for cand in _root_candidates():
+        if os.path.isdir(os.path.join(cand, "runs_v2")):
+            return cand
+    return _root_candidates()[0]
+
+
+MIRROR = resolve_results_root()
+OUT = os.environ.get("ICD_FIGURES_OUT") or os.path.join(REPO, "figures", "out")
+#: JSON written by analysis/bucket_metrics.py --json-out, the source of Fig. 5.
+BUCKET_JSON = os.environ.get("ICD_BUCKET_JSON") or os.path.join(MIRROR, "longtail",
+                                                               "bucket_metrics.json")
 
 plt.rcParams.update({
     "font.size": 8, "axes.labelsize": 8, "axes.titlesize": 8.5,
@@ -39,11 +75,14 @@ CELLS = ["1_msmn_fp32_naive", "2_msmn_bf16_naive", "3_transf_bf16_naive",
 NICE = {"1_msmn_fp32_naive": "cell 1: BiLSTM fp32", "2_msmn_bf16_naive": "cell 2: BiLSTM bf16",
         "3_transf_bf16_naive": "cell 3: Transf. bf16\n(non-flash)", "5_transf_bf16_varlen_fa": "cell 5: Transf. bf16\n(flash)",
         "6_transf_fp32_naive": "cell 6: Transf. fp32", "7_hybrid_lstm_label_fa_text": "cell 7: hybrid\n(label bf16)",
-        "8_hybrid_labelfp32": "cell 8: hybrid\n(label fp32)"}
+        "8_hybrid_labelfp32": "cell 8: hybrid\n(label fp32)",
+        # cell 4 is a decoder-only micro-benchmark: it is not on the published figures, but
+        # it is in the long-tail dump, so Fig. 5 must be able to label it rather than skip it
+        "4_transf_bf16_memeff": "cell 4: Transf. bf16\n(mem-efficient)"}
 COL = {"1_msmn_fp32_naive": "#1b5e20", "2_msmn_bf16_naive": "#c62828",
        "3_transf_bf16_naive": "#1565c0", "5_transf_bf16_varlen_fa": "#00838f",
        "6_transf_fp32_naive": "#37474f", "7_hybrid_lstm_label_fa_text": "#8e24aa",
-       "8_hybrid_labelfp32": "#e65100"}
+       "8_hybrid_labelfp32": "#e65100", "4_transf_bf16_memeff": "#6d4c41"}
 
 
 def recs(sub, tag):
@@ -244,12 +283,16 @@ def fig3():
                                                  (keys[g][1], "bf16", "#c62828")]):
                 if tag in FULL_REPLICATED:
                     st_full, _n = full_seed_stats(tag)
+                    if metric not in st_full:      # cell not run yet: leave the slot empty
+                        continue
                     v, sd = st_full[metric][0] * 100, st_full[metric][1] * 100
                     ax.bar(i + (k - 0.5) * w, v, w, yerr=sd, color=col, alpha=0.9,
                            error_kw=dict(lw=0.8, capsize=2),
                            label=lab if i == 0 else None)
                 else:
                     b = full(tag)
+                    if not b:
+                        continue
                     v = b["test"][metric] * 100
                     ax.bar(i + (k - 0.5) * w, v, w, color=col, alpha=0.9,
                            label=lab if i == 0 else None)
@@ -303,32 +346,45 @@ def fig4():
     # (a) the cell 1 - cell 2 effect against label-space size
     ax = axes[0]
     st50, _ = seed_stats("1_msmn_fp32_naive"); st50b, _ = seed_stats("2_msmn_bf16_naive")
-    d50 = (st50["auc_macro"][0] - st50b["auc_macro"][0]) * 100
-    e50 = np.sqrt(st50["auc_macro"][1] ** 2 + st50b["auc_macro"][1] ** 2) * 100
-    # Full scale: difference of three-run means with the combined s.e. of independent samples
     s1, n1 = full_seed_stats("1_msmn_fp32_naive"); s2, n2 = full_seed_stats("2_msmn_bf16_naive")
-    dfull = (s1["auc_macro"][0] - s2["auc_macro"][0]) * 100
-    efull = np.sqrt(s1["auc_macro"][1] ** 2 / n1 + s2["auc_macro"][1] ** 2 / n2) * 100
-    ax.bar([0, 1], [dfull, d50], yerr=[efull, e50], color=["#c62828", "#90a4ae"],
-           error_kw=dict(lw=0.8, capsize=3))
-    for x, v, e in zip([0, 1], [dfull, d50], [efull, e50]):
-        ax.text(x, v + e + 0.25, "%.2f" % v, ha="center", fontsize=7)
+    have = all("auc_macro" in d for d in (st50, st50b, s1, s2))
+    if have:
+        d50 = (st50["auc_macro"][0] - st50b["auc_macro"][0]) * 100
+        e50 = np.sqrt(st50["auc_macro"][1] ** 2 + st50b["auc_macro"][1] ** 2) * 100
+        # Full scale: difference of three-run means with the combined s.e. of independent samples
+        dfull = (s1["auc_macro"][0] - s2["auc_macro"][0]) * 100
+        efull = np.sqrt(s1["auc_macro"][1] ** 2 / max(n1, 1)
+                        + s2["auc_macro"][1] ** 2 / max(n2, 1)) * 100
+        ax.bar([0, 1], [dfull, d50], yerr=[efull, e50], color=["#c62828", "#90a4ae"],
+               error_kw=dict(lw=0.8, capsize=3))
+        for x, v, e in zip([0, 1], [dfull, d50], [efull, e50]):
+            ax.text(x, v + e + 0.25, "%.2f" % v, ha="center", fontsize=7)
+        ax.text(1, d50 + 2.2, "within seed noise\n($\\pm$0.1)", ha="center", fontsize=6.4,
+                color="#546e7a")
+    else:
+        ax.text(0.5, 6.6, "cells 1/2 (full and 50-code) not found\nin the results root",
+                ha="center", fontsize=7, color="#90a4ae")
     ax.set_xticks([0, 1]); ax.set_xticklabels(["full\n35,684 slots", "MIMIC-III-50\n200 slots"])
     ax.set_ylabel("precision cost $\\Delta$AUC-macro (pts)")
     ax.set_title("(a) same pair, two label-space scales")
     ax.set_ylim(0, 13.2)
-    ax.text(1, d50 + 2.2, "within seed noise\n($\\pm$0.1)", ha="center", fontsize=6.4, color="#546e7a")
     # (b) label-side precision in the hybrid cells
     ax = axes[1]
     r7, r8 = full("7_hybrid_lstm_label_fa_text"), full("8_hybrid_labelfp32")
     h50 = best("runs_diag", "7b_hybrid_50code_diag")
-    vals = [h50["test"]["auc_macro"] * 100 if h50 else np.nan,
-            r7["test"]["auc_macro"] * 100, r8["test"]["auc_macro"] * 100]
+
+    def _auc(rec):
+        return np.nan if not rec else rec["test"]["auc_macro"] * 100
+
+    vals = [_auc(h50), _auc(r7), _auc(r8)]
     labs = ["hybrid, label bf16\n(50 codes,\n3 epochs)", "hybrid, label bf16\n(full)", "hybrid, label fp32\n(full)"]
     cols = ["#a5d6a7", "#8e24aa", "#e65100"]
-    ax.bar(range(3), vals, color=cols)
+    ax.bar(range(3), [0 if np.isnan(v) else v for v in vals], color=cols)
     for x, v in enumerate(vals):
-        ax.text(x, v + 2, "%.2f" % v, ha="center", fontsize=7)
+        if np.isnan(v):
+            ax.text(x, 4, "not run", ha="center", fontsize=6.0, color="#90a4ae")
+        else:
+            ax.text(x, v + 2, "%.2f" % v, ha="center", fontsize=7)
     ax.set_xticks(range(3)); ax.set_xticklabels(labs, fontsize=6.4)
     ax.set_ylabel("test AUC-macro"); ax.set_ylim(0, 112)
     ax.set_title("(b) one setting, same architecture")
@@ -339,34 +395,85 @@ def fig4():
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fig. 5: long-tail buckets
+#
+# Primary source: analysis/bucket_metrics.py --json-out, which computes micro-F1 and
+# macro-AUC per training-frequency bucket from the dumped predictions. The literals below
+# are the values the *published* figure was drawn from, kept only so that this figure can
+# still be regenerated on a machine without the long-tail dump; when they are used the
+# script prints a warning, because a fallback silently used after a re-run would put stale
+# numbers into a fresh figure.
 # ─────────────────────────────────────────────────────────────────────────────
 BUCKETS = ["N=1", "2-5", "6-20", "21-100", ">100"]
-F1 = {"1_msmn_fp32_naive": [2.0, 6.2, 17.8, 34.0, 62.9],
-      "2_msmn_bf16_naive": [0.0, 0.0, 0.2, 3.0, 51.2],
-      "3_transf_bf16_naive": [0.0, 1.1, 10.0, 26.3, 57.7],
-      "5_transf_bf16_varlen_fa": [0.0, 0.6, 8.7, 25.8, 57.4],
-      "6_transf_fp32_naive": [0.0, 0.3, 7.2, 24.2, 57.4],
-      "8_hybrid_labelfp32": [0.0, 2.7, 13.0, 30.7, 58.7]}
-AUC = {"1_msmn_fp32_naive": [94.0, 94.3, 95.1, 96.2, 95.6],
-       "2_msmn_bf16_naive": [85.6, 85.2, 85.8, 89.0, 91.1],
-       "3_transf_bf16_naive": [93.6, 94.3, 94.7, 95.5, 95.0],
-       "5_transf_bf16_varlen_fa": [93.0, 93.8, 94.6, 95.5, 95.0],
-       "6_transf_fp32_naive": [94.4, 93.2, 94.4, 95.4, 94.8],
-       "8_hybrid_labelfp32": [92.4, 93.6, 94.3, 95.7, 95.1]}
+
+F1_FALLBACK = {"1_msmn_fp32_naive": [2.0, 6.2, 17.8, 34.0, 62.9],
+               "2_msmn_bf16_naive": [0.0, 0.0, 0.2, 3.0, 51.2],
+               "3_transf_bf16_naive": [0.0, 1.1, 10.0, 26.3, 57.7],
+               "5_transf_bf16_varlen_fa": [0.0, 0.6, 8.7, 25.8, 57.4],
+               "6_transf_fp32_naive": [0.0, 0.3, 7.2, 24.2, 57.4],
+               "8_hybrid_labelfp32": [0.0, 2.7, 13.0, 30.7, 58.7]}
+AUC_FALLBACK = {"1_msmn_fp32_naive": [94.0, 94.3, 95.1, 96.2, 95.6],
+                "2_msmn_bf16_naive": [85.6, 85.2, 85.8, 89.0, 91.1],
+                "3_transf_bf16_naive": [93.6, 94.3, 94.7, 95.5, 95.0],
+                "5_transf_bf16_varlen_fa": [93.0, 93.8, 94.6, 95.5, 95.0],
+                "6_transf_fp32_naive": [94.4, 93.2, 94.4, 95.4, 94.8],
+                "8_hybrid_labelfp32": [92.4, 93.6, 94.3, 95.7, 95.1]}
+
+
+def load_bucket_tables():
+    """→ (f1_by_cell, auc_by_cell, bucket_labels, source description).
+
+    Reads the JSON from bucket_metrics.py. Its shape is
+        {"scheme": "5buckets", "buckets": ["N=1", ...],
+         "models": {"<cell tag>": {"f1mi": [...], "aucm": [...], ...}}}
+    and any cell it does not contain is simply left out of the figure -- better a shorter
+    bar group than a bar that no run produced.
+    """
+    if os.path.exists(BUCKET_JSON):
+        with open(BUCKET_JSON, encoding="utf-8") as f:
+            d = json.load(f)
+        labels = d.get("buckets") or BUCKETS
+        f1, auc = {}, {}
+        for tag, m in (d.get("models") or {}).items():
+            if tag not in COL:                    # unknown name: no colour, no slot
+                print("   [warn] bucket json has %r, which is not a known cell; skipped" % tag)
+                continue
+            if m.get("f1mi") is not None:
+                f1[tag] = [np.nan if v is None else v for v in m["f1mi"]]
+            if m.get("aucm") is not None:
+                auc[tag] = [np.nan if v is None else v for v in m["aucm"]]
+        if f1 or auc:
+            return f1, auc, labels, "bucket_metrics json (%s)" % BUCKET_JSON
+
+    print("   [warn] %s not found (or empty)." % BUCKET_JSON)
+    print("          Fig. 5 falls back to the values the published figure was drawn from.")
+    print("          Regenerate it with:  python analysis/bucket_metrics.py "
+          "--json-out %s ..." % BUCKET_JSON)
+    return dict(F1_FALLBACK), dict(AUC_FALLBACK), BUCKETS, "fallback constants"
 
 
 def fig5():
+    f1, auc, labels, src = load_bucket_tables()
+    print("   fig5 data: %s (%d cells)" % (src, len(f1)))
     fig, axes = plt.subplots(1, 2, figsize=(6.8, 2.9), sharex=True)
-    for ax, D, ttl, ylab in [(axes[0], F1, "micro-F1 by training frequency", "micro-F1 (%)"),
-                             (axes[1], AUC, "AUC-macro by training frequency", "AUC-macro (%)")]:
-        n = len(D); w = 0.135
+    for ax, D, ttl, ylab in [(axes[0], f1, "micro-F1 by training frequency", "micro-F1 (%)"),
+                             (axes[1], auc, "AUC-macro by training frequency", "AUC-macro (%)")]:
+        n = max(1, len(D)); w = 0.135 if n <= 6 else 0.8 / n
         for i, (t, v) in enumerate(D.items()):
-            ax.bar(np.arange(len(BUCKETS)) + (i - (n - 1) / 2) * w, v, w,
+            ax.bar(np.arange(len(labels)) + (i - (n - 1) / 2) * w, v, w,
                    color=COL[t], label=NICE[t].replace("\n", " "))
-        ax.set_xticks(range(len(BUCKETS))); ax.set_xticklabels(BUCKETS)
+        ax.set_xticks(range(len(labels)))
+        ax.set_xticklabels([l.replace("$", "").replace("\\le", "≤").replace("N >", ">")
+                            for l in labels])
         ax.set_xlabel("codes per bucket (training frequency)")
         ax.set_ylabel(ylab); ax.set_title(ttl)
-    axes[1].set_ylim(80, 100); axes[0].set_ylim(0, 72)
+    # Limits follow the data instead of clipping it: the published run tops out at 62.9
+    # (micro-F1) and 95.7 (AUC-macro), but a re-run must not lose a bar above that.
+    def _top(D, floor):
+        vals = [v for arr in D.values() for v in arr if v is not None and not np.isnan(v)]
+        return max(floor, (max(vals) * 1.06) if vals else floor)
+
+    axes[0].set_ylim(0, _top(f1, 72))
+    axes[1].set_ylim(80, min(100.5, _top(auc, 100)))
     axes[0].legend(frameon=False, fontsize=4.9, ncol=2, loc="upper left",
                    handlelength=1.1, columnspacing=0.9, labelspacing=0.35)
     fig.tight_layout()
@@ -374,8 +481,72 @@ def fig5():
     plt.close(fig)
 
 
+def main():
+    global MIRROR, OUT, BUCKET_JSON
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--root", default=None,
+                    help="results root holding runs_v2/ runs_seeds/ ... "
+                         "(default: $ICD_RESULTS_ROOT, then the paper's mirror, then the repo)")
+    ap.add_argument("--out", default=None, help="figure output directory (default: figures/out)")
+    ap.add_argument("--bucket-json", default=None,
+                    help="bucket_metrics.py --json-out file for Fig. 5 "
+                         "(default: <root>/longtail/bucket_metrics.json)")
+    ap.add_argument("--only", default=None,
+                    help="comma-separated subset of figures to draw, e.g. 3,5 (default: all)")
+    a = ap.parse_args()
+
+    if a.root:
+        MIRROR = resolve_results_root(a.root)
+    if a.out:
+        OUT = a.out
+    if a.bucket_json:
+        BUCKET_JSON = a.bucket_json
+    elif not os.environ.get("ICD_BUCKET_JSON"):
+        # follows the resolved root, or --root would silently keep pointing at the default
+        BUCKET_JSON = os.path.join(MIRROR, "longtail", "bucket_metrics.json")
+    os.makedirs(OUT, exist_ok=True)
+
+    print("results root: %s" % MIRROR)
+    print("output      : %s" % OUT)
+    have_runs = os.path.isdir(os.path.join(MIRROR, "runs_v2"))
+    if not os.path.isdir(MIRROR):
+        print("   [warn] that directory does not exist; every data-driven figure will be empty")
+    elif not have_runs:
+        print("   [warn] %s has no runs_v2/; pointing --root at the wrong level is the "
+              "usual cause" % MIRROR)
+
+    want = {s.strip() for s in (a.only or "1,2,3,4,5").split(",") if s.strip()}
+    figs = [("1", fig1), ("2", fig2), ("3", fig3), ("4", fig4), ("5", fig5)]
+    failed = []
+    for name, fn in figs:
+        if name not in want:
+            continue
+        try:
+            fn()
+        except Exception as exc:                  # one missing panel must not lose the rest
+            print("   [warn] fig%s could not be drawn: %s: %s"
+                  % (name, type(exc).__name__, exc))
+            failed.append(name)
+
+    print("figures ->", OUT)
+    for f in sorted(os.listdir(OUT)):
+        print("   ", f, os.path.getsize(os.path.join(OUT, f)) // 1024, "KB")
+    if failed or not have_runs:
+        extra = "" if failed else "\n[warn] no run directories were found, so every " \
+                                 "data-driven figure is empty."
+        if failed:
+            extra = ("\n[warn] incomplete: fig%s. That is expected without the corresponding"
+                     " run directories; nothing was silently substituted." % ", fig".join(failed))
+        print(extra)
+        return 1
+    return 0
+
+
 if __name__ == "__main__":
-    fig1(); fig2(); fig3(); fig4(); fig5()
+    import sys
+    sys.exit(main())
+
     print("figures ->", OUT)
     for f in sorted(os.listdir(OUT)):
         print("   ", f, os.path.getsize(os.path.join(OUT, f)) // 1024, "KB")
