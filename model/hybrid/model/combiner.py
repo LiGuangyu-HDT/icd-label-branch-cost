@@ -64,8 +64,12 @@ class LSTM_Combiner(Combiner):
     def combine_forward(self, embeds, word_mask, enc_repr=None):
         word_lengths = torch.sum(word_mask, dim=1)
         h = self.lstm_forward(embeds, word_lengths, self.combine_lstm)
-        if self.norm is not None:
-            h = self.norm(h)
+        # getattr, not self.norm: checkpoints saved before --label_layer_norm existed do not
+        # carry the attribute at all, and unpickling does not run __init__, so a plain
+        # attribute read raises AttributeError on those runs.
+        norm = getattr(self, 'norm', None)
+        if norm is not None:
+            h = norm(h)
         return h
     
     
