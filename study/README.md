@@ -13,6 +13,10 @@ export ICD_REPO=$PWD/model/main            # default: ../model/main
 export OUT_DIR=/path/to/results            # default: ./out/<script>
 ```
 
+`run_matrix_v2.sh` writes its run directories to `OUT_DIR` (default `study/out/runs_v2`),
+tags each one with the cell name, and records the mapping in `$OUT_DIR/INDEX.tsv`. That tag
+is what `analysis/` and `figures/` match on, so a run launched by hand needs `--tag <cell>`.
+
 | Script | What it runs | Paper |
 |---|---|---|
 | `run_matrix_v2.sh` | the eight cells at full scale, one variable per step | Tables 3–11, Figs 2–5 |
@@ -36,7 +40,14 @@ export OUT_DIR=/path/to/results            # default: ./out/<script>
 | 8 | Transformer 4×512 + BiLSTM label | label fp32 | naive | the repair |
 
 Every cell shares one recipe (Table 3 of the paper): effective batch 16, AdamW at 5e-4,
-weight decay 0.01, no warm-up, 20 epochs, R-Drop α = 5, four synonym slots.
+weight decay 0.01, no warm-up, 20 epochs, R-Drop α = 5, four synonym slots. `--epochs`
+changes it for plumbing checks; the default is the paper's 20, not 1.
+
+Cells 7 and 8 run from `model/hybrid` (the script selects the tree per cell); cells 1–6 from
+`model/main`. Cell 7 puts the text branch on flash (`--attn_impl varlen`) and gives the label
+branch its own BiLSTM (`--label_combiner lstm`), which forces that branch to the padded
+representation — so `--label_repr` is deliberately not passed. Cell 8 adds `--label_fp32`,
+which cannot be combined with `--label_repr varlen`.
 
 ## Selected on dev, compared at matched epochs
 

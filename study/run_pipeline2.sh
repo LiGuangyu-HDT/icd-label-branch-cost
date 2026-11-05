@@ -15,7 +15,10 @@
 #
 # The chain, on two GPUs:
 #   GPU0  full-scale precision probe -> mimic3-50 single-GPU seeds -> speed re-measurement
-#   GPU1  the remaining cells
+#   GPU1  the remaining cells -- cells 7/8 are launched by run_matrix_v2.sh, which this
+#         script does not start itself: it waits on their completion markers. Start the
+#         matrix first (bash run_matrix_v2.sh --cells 7,8 &), or the wait simply times out
+#         and the rest of lane1 proceeds.
 #
 # Each stage is waited on by file, not by process name.
 # =============================================================================
@@ -29,7 +32,10 @@ LOG="$RES/PIPELINE2_MAIN.log"
 GPU0_FREE=/tmp/gpu0_free_v2
 DONE=/tmp/pipeline2_done
 PROBE_RC="$PROBES/PROBE_MAIN.log.rc"
-C7_RC="$RES/formal_v2/7_hybrid_lstm_label_fa_text.log.rc"
+# run_matrix_v2.sh writes both the log and its rc file into the run root, so cell 7's
+# completion marker lives there (it used to be looked for under a directory nothing
+# created, which made lane1 wait 20 minutes and then continue regardless).
+C7_RC="$RUNS/7_hybrid_lstm_label_fa_text.log.rc"
 
 log() { echo "[pipe2 $(date -u -d '+8 hour' '+%m-%d %H:%M')] $*" >> "$LOG"; }
 wait_rc() {
