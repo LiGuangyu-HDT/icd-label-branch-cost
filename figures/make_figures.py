@@ -132,6 +132,31 @@ def full_seed_stats(tag):
     return out, len(runs)
 
 
+def cell7_four_stats():
+    """All four cell-7 runs: the original plus the three re-runs of this version.
+
+    Section 6 reports the mean and s.d. of these four, so the figure has to as well;
+    reading the original run alone would put 49.20 on the bar where the table says
+    49.80 +/- 0.41. Returns ({metric: (mean, sd)}, n).
+    """
+    runs = []
+    b = best("runs_v2", "7_hybrid_lstm_label_fa_text")
+    if b:
+        runs.append(b)
+    for lab in ("7b_s1", "7b_s2", "7b_s3"):
+        b = best("runs_v2", lab)
+        if b:
+            runs.append(b)
+    out = {}
+    for k in ("auc_macro", "f1_micro", "prec_at_8", "f1_macro"):
+        v = [(r.get("test") or {}).get(k) for r in runs]
+        v = [x for x in v if x is not None]
+        if not v:
+            continue
+        out[k] = (float(np.mean(v)), float(np.std(v, ddof=1)) if len(v) > 1 else 0.0)
+    return out, len(runs)
+
+
 def seed_stats(tag):
     """50-code, three seeds: select each seed on dev P@8 and return (mean, std, raw)."""
     vals = {}
@@ -195,7 +220,7 @@ def fig1():
             "1,070,520 padded slots for 200,353 real tokens = 18.7%  ($5.34\\times$ waste; padding is not masked out)",
             ha="center", va="center", fontsize=6.6, color=MUT, style="italic")
     # the two key quantities on the right, emphasised
-    ax.text(89, 46.5, "94 KB per real token\n$\\Rightarrow$ 18.8 GB predicted, 18.48 GB measured",
+    ax.text(89, 46.5, "96.7 KiB per real token (measured)\n84 KiB of it from the layer count",
             ha="center", va="center", fontsize=6.6, color=ACC, linespacing=1.4)
     ax.text(89, 20.0, "fits one 24 GB GPU\nin fp32 and bf16",
             ha="center", va="center", fontsize=6.6, color=ACC, linespacing=1.4)
@@ -345,12 +370,18 @@ def fig4():
     fig, axes = plt.subplots(1, 2, figsize=(6.8, 2.9))
     # (a) the cell 1 - cell 2 effect against label-space size
     ax = axes[0]
-    st50, _ = seed_stats("1_msmn_fp32_naive"); st50b, _ = seed_stats("2_msmn_bf16_naive")
+    st50, raw50 = seed_stats("1_msmn_fp32_naive"); st50b, raw50b = seed_stats("2_msmn_bf16_naive")
     s1, n1 = full_seed_stats("1_msmn_fp32_naive"); s2, n2 = full_seed_stats("2_msmn_bf16_naive")
     have = all("auc_macro" in d for d in (st50, st50b, s1, s2))
     if have:
         d50 = (st50["auc_macro"][0] - st50b["auc_macro"][0]) * 100
-        e50 = np.sqrt(st50["auc_macro"][1] ** 2 + st50b["auc_macro"][1] ** 2) * 100
+        # Standard error of the difference: the same convention as the full-scale bar, so
+        # the two bars are on one scale. The text quotes 0.23 +/- 0.08; combining the
+        # per-run s.d. instead would give 0.14 and silently use a second convention.
+        n50 = len(raw50.get("auc_macro") or [1])
+        n50b = len(raw50b.get("auc_macro") or [1])
+        e50 = np.sqrt(st50["auc_macro"][1] ** 2 / max(n50, 1)
+                      + st50b["auc_macro"][1] ** 2 / max(n50b, 1)) * 100
         # Full scale: difference of three-run means with the combined s.e. of independent samples
         dfull = (s1["auc_macro"][0] - s2["auc_macro"][0]) * 100
         efull = np.sqrt(s1["auc_macro"][1] ** 2 / max(n1, 1)
@@ -359,7 +390,7 @@ def fig4():
                error_kw=dict(lw=0.8, capsize=3))
         for x, v, e in zip([0, 1], [dfull, d50], [efull, e50]):
             ax.text(x, v + e + 0.25, "%.2f" % v, ha="center", fontsize=7)
-        ax.text(1, d50 + 2.2, "within seed noise\n($\\pm$0.1)", ha="center", fontsize=6.4,
+        ax.text(1, d50 + 2.2, "n.s.\n(s.e. $\\pm$0.08)", ha="center", fontsize=6.4,
                 color="#546e7a")
     else:
         ax.text(0.5, 6.6, "cells 1/2 (full and 50-code) not found\nin the results root",
@@ -370,21 +401,28 @@ def fig4():
     ax.set_ylim(0, 13.2)
     # (b) label-side precision in the hybrid cells
     ax = axes[1]
-    r7, r8 = full("7_hybrid_lstm_label_fa_text"), full("8_hybrid_labelfp32")
+    r7, n7 = cell7_four_stats()
+    r8 = full("8_hybrid_labelfp32")
     h50 = best("runs_diag", "7b_hybrid_50code_diag")
 
     def _auc(rec):
         return np.nan if not rec else rec["test"]["auc_macro"] * 100
 
-    vals = [_auc(h50), _auc(r7), _auc(r8)]
-    labs = ["hybrid, label bf16\n(50 codes,\n3 epochs)", "hybrid, label bf16\n(full)", "hybrid, label fp32\n(full)"]
+    # Cell 7 is the mean of every run we have, so its bar carries an error bar; the other
+    # two are single runs and carry none. Reading the original run alone would put 49.20
+    # here where Section 6 reports 49.80 +/- 0.41.
+    vals = [_auc(h50), r7["auc_macro"][0] * 100, _auc(r8)]
+    errs = [0.0, r7["auc_macro"][1] * 100, 0.0]
+    labs = ["hybrid, label bf16\n(50 codes,\n3 epochs)",
+            "hybrid, label bf16\n(full, %d runs)" % n7, "hybrid, label fp32\n(full)"]
     cols = ["#a5d6a7", "#8e24aa", "#e65100"]
-    ax.bar(range(3), [0 if np.isnan(v) else v for v in vals], color=cols)
-    for x, v in enumerate(vals):
+    ax.bar(range(3), [0 if np.isnan(v) else v for v in vals], color=cols, yerr=errs,
+           error_kw=dict(lw=0.8, capsize=3))
+    for x, v, e in zip(range(3), vals, errs):
         if np.isnan(v):
             ax.text(x, 4, "not run", ha="center", fontsize=6.0, color="#90a4ae")
         else:
-            ax.text(x, v + 2, "%.2f" % v, ha="center", fontsize=7)
+            ax.text(x, v + e + 2, "%.2f" % v, ha="center", fontsize=7)
     ax.set_xticks(range(3)); ax.set_xticklabels(labs, fontsize=6.4)
     ax.set_ylabel("test AUC-macro"); ax.set_ylim(0, 112)
     ax.set_title("(b) one setting, same architecture")
