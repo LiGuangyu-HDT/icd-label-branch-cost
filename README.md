@@ -208,7 +208,25 @@ six from `model/main`. `run_pipeline2.sh` waits on cell 7's `<name>.log.rc` in t
 bash run_precision_probe.sh          # P1 = text bf16 / label fp32, P2 = the reverse
 ```
 
-### 6.3 MIMIC-III-50, three seeds (§6.5, Table 9)
+### 6.3 Cell 7 replication and the normalisation probe (§7)
+
+```bash
+bash run_cell7_rerun.sh              # three re-runs, then one --label_layer_norm run
+```
+
+Cell 7 collapses to chance, so the paper replaces its single original run with the mean of
+four, and tests the mechanism prediction that a normalisation layer on the recurrent label
+branch should recover part of the loss.
+
+`--label_layer_norm` puts a `LayerNorm` on the BiLSTM's output, in the same position and on
+the same `rnn_dim` stream that `--layer_norm` uses for the Transformer branch. It exists so
+the prediction can be tested in isolation: `--layer_norm` also changes the text branch and
+would not leave a single variable. **It does not recover the loss** — the probe sits at chance
+in every epoch, like the unnormalised runs — and it is documented here so that negative
+result can be reproduced rather than taken on trust. Default off, so no existing
+configuration changes.
+
+### 6.4 MIMIC-III-50, three seeds (§6.5, Table 9)
 
 ```bash
 bash run_seeds.sh                    # four configurations × three seeds
@@ -219,7 +237,7 @@ repeat runs are independent samples rather than paired ones. Standard deviations
 therefore computed as independent-sample s.d., and differences as
 `sqrt(s1²/n1 + s2²/n2)`.
 
-### 6.4 Model selection rule
+### 6.5 Model selection rule
 
 Every cell is selected on **dev P@8**, and all cross-configuration comparisons are made at
 **matched epochs**, not at each cell's best epoch — otherwise a longer-running cell wins by

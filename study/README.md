@@ -22,6 +22,7 @@ is what `analysis/` and `figures/` match on, so a run launched by hand needs `--
 | `run_matrix_v2.sh` | the eight cells at full scale, one variable per step | Tables 3–11, Figs 2–5 |
 | `run_precision_probe.sh` | P1 / P2: bf16 on one branch only | §6.4, Table 8 |
 | `run_seeds.sh` | four configurations × three seeds in the 50-code setting | §6.5, Table 9 |
+| `run_cell7_rerun.sh` | three cell 7 re-runs, then the `--label_layer_norm` probe | §7, Table 12 |
 | `run_warmup_probe.sh` | rules out "the Transformer was undertrained" | §7.7 |
 | `run_speed_retest.sh` | contention-free speed numbers | §5.8 |
 | `run_pipeline2.sh` | the orchestrated chain, both GPUs | the reported runs |
